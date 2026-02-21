@@ -99,8 +99,7 @@ blacklist.txt
 
 
 ###  Dicas de Uso
-- Para ver seu ID e Chave API, acesse: [https://rule34.xxx/index.php?page=account&s=options](https://rule34.xxx/index.php?page=account&s=options)
-
+- Para ver seu ID e Chave API, acesse: [Acessar conta Rule34](https://rule34.xxx/index.php?page=account&s=options)
 ---
 
 
