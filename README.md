@@ -21,24 +21,27 @@ Booru Downloader é uma ferramenta Python que automatiza o download de imagens d
 ## Instalação
 
 1. Tenha Python 3 instalado.
-2. Instale as dependências:
-
-```bash
-pip install requests python-dotenv PySide6
-```
-
-3. Clone o repositório:
+2. Clone o repositório:
 
 ```bash
 git clone https://github.com/exfurr-bash/booru-downloader.git
 cd booru-downloader
 ```
 
-4. Crie um ambiente virtual (opcional, mas recomendado):
+3. Crie e ative um ambiente virtual (opcional, mas recomendado):
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # Linux/macOS
+.venv\Scripts\activate     # Windows
+```
+
+4. Instale as dependências dentro do ambiente virtual:
+
+```bash
+pip install -r requirements.txt
+# ou
+pip install requests python-dotenv PySide6
 ```
 
 ---
