@@ -37,18 +37,21 @@ load_dotenv()
 # --- NÚCLEO DO DOWNLOADER ---
 
 class R34Downloader:
-    def __init__(self, output_dir="downloads", threads=10, limit=1000, file_type="all"):
+    def __init__(self, output_dir="downloads", threads=10, page_limit=1000, total_limit=0, file_type="all", ignore_blacklist=False):
         self.output_dir = output_dir
         self.threads = threads
-        self.limit = limit
+        self.page_limit = page_limit
+        self.total_limit = total_limit # 0 means no limit (mass download)
         self.file_type = file_type # "all", "images", "videos"
+        self.ignore_blacklist = ignore_blacklist
         self.api_key = os.getenv("R34_API_KEY")
         self.user_id = os.getenv("R34_USER_ID")
         self.blacklist_file = "blacklist.txt"
         self.running = False
+        self.downloaded_count = 0
 
     def get_blacklist(self):
-        if not os.path.exists(self.blacklist_file): return ""
+        if self.ignore_blacklist or not os.path.exists(self.blacklist_file): return ""
         try:
             with open(self.blacklist_file, "r") as f:
                 tags = f.read().split()
@@ -58,9 +61,16 @@ class R34Downloader:
             return ""
 
     def fetch_page(self, tags, pid):
+        # Adjust limit for the last page if total_limit is set
+        current_page_limit = self.page_limit
+        if self.total_limit > 0:
+            remaining = self.total_limit - self.downloaded_count
+            if remaining <= 0: return []
+            current_page_limit = min(self.page_limit, remaining)
+
         params = {
             "page": "dapi", "s": "post", "q": "index", "tags": tags,
-            "limit": self.limit, "pid": pid, "json": 1
+            "limit": current_page_limit, "pid": pid, "json": 1
         }
         
         # Só adiciona se ambos existirem e não forem vazios
@@ -72,7 +82,7 @@ class R34Downloader:
             url = "https://api.rule34.xxx/index.php"
             # Log da URL para depuração (sem mostrar a API KEY inteira)
             safe_tags = urllib.parse.quote(tags)
-            logger.debug(f"Acessando: {url}?page=dapi&s=post&q=index&tags={safe_tags}&pid={pid}")
+            logger.debug(f"Acessando: {url}?page=dapi&s=post&q=index&tags={safe_tags}&pid={pid}&limit={current_page_limit}")
             
             response = requests.get(url, params=params, headers=headers, timeout=15)
             
@@ -91,9 +101,13 @@ class R34Downloader:
 
     def save_post(self, post, pbar=None, log_callback=None, image_callback=None):
         if not self.running or not isinstance(post, dict):
-            return
+            return False
+        
+        if self.total_limit > 0 and self.downloaded_count >= self.total_limit:
+            return False
+
         file_url = post.get('file_url')
-        if not file_url: return
+        if not file_url: return False
 
         ext = os.path.splitext(file_url)[1].lower()
         
@@ -101,10 +115,10 @@ class R34Downloader:
         is_video = ext in ['.mp4', '.webm', '.mov']
         if self.file_type == "images" and is_video:
             if pbar: pbar.update(1)
-            return
+            return False
         if self.file_type == "videos" and not is_video:
             if pbar: pbar.update(1)
-            return
+            return False
 
         post_id = post.get('id')
         filename = os.path.join(self.output_dir, f"{post_id}{ext}")
@@ -112,7 +126,8 @@ class R34Downloader:
         if os.path.exists(filename):
             if pbar: pbar.update(1)
             if image_callback: image_callback(filename)
-            return
+            self.downloaded_count += 1
+            return True
 
         try:
             headers = {"User-Agent": "Rule34Downloader/2.0"}
@@ -125,6 +140,8 @@ class R34Downloader:
                 logger.info(msg)
                 if log_callback: log_callback(msg)
                 if image_callback: image_callback(filename)
+                self.downloaded_count += 1
+                return True
             else:
                 msg = f"Falha HTTP {response.status_code}: {post_id}"
                 logger.warning(msg)
@@ -135,9 +152,11 @@ class R34Downloader:
             if log_callback: log_callback(msg)
         finally:
             if pbar: pbar.update(1)
+        return False
 
     def start_download(self, user_tags, log_callback=None, progress_callback=None, image_callback=None):
         self.running = True
+        self.downloaded_count = 0
         os.makedirs(self.output_dir, exist_ok=True)
         full_query = f"{user_tags} {self.get_blacklist()}".strip()
         
@@ -146,38 +165,58 @@ class R34Downloader:
         else:
             logger.info("Sessão iniciada em modo ANÔNIMO.")
         
+        if self.ignore_blacklist:
+            logger.info("Blacklist IGNORADA para esta sessão.")
+
         logger.info(f"Busca iniciada para: {user_tags}")
+        if self.total_limit > 0:
+            logger.info(f"Limite de download: {self.total_limit} arquivos.")
+        else:
+            logger.info("Modo MASS DOWNLOAD: baixando tudo disponível.")
         
         pid = 0
-        total_processed = 0
         
-        with ThreadPoolExecutor(max_workers=self.threads) as executor:
-            while self.running:
-                posts = self.fetch_page(full_query, pid)
-                if not posts or not isinstance(posts, list):
-                    logger.info("Fim dos resultados da API.")
-                    break
+        try:
+            with ThreadPoolExecutor(max_workers=self.threads) as executor:
+                while self.running:
+                    if self.total_limit > 0 and self.downloaded_count >= self.total_limit:
+                        logger.info("Limite total atingido.")
+                        break
 
-                logger.info(f"Página {pid}: {len(posts)} posts encontrados.")
-                if log_callback:
-                    log_callback(f"[*] Página {pid}: Baixando {len(posts)} posts...")
-                
-                futures = [executor.submit(self.save_post, p, None, log_callback, image_callback) for p in posts]
-                
-                for future in futures:
-                    try:
-                        future.result()
-                    except Exception as e:
-                        logger.error(f"Erro em thread de download: {e}")
-                    if progress_callback:
-                        progress_callback(1)
+                    posts = self.fetch_page(full_query, pid)
+                    if not posts or not isinstance(posts, list):
+                        logger.info("Fim dos resultados da API.")
+                        break
 
-                total_processed += len(posts)
-                pid += 1
+                    logger.info(f"Página {pid}: {len(posts)} posts encontrados.")
+                    if log_callback:
+                        log_callback(f"[*] Página {pid}: Baixando {len(posts)} posts...")
+                    
+                    futures = []
+                    for p in posts:
+                        if not self.running: break
+                        futures.append(executor.submit(self.save_post, p, None, log_callback, image_callback))
+                    
+                    for future in futures:
+                        if not self.running: break
+                        try:
+                            if future.result() and progress_callback:
+                                progress_callback(1)
+                        except Exception as e:
+                            logger.error(f"Erro em thread de download: {e}")
+                        
+                        if self.total_limit > 0 and self.downloaded_count >= self.total_limit:
+                            self.running = False
+                            break
+
+                    pid += 1
+        except KeyboardInterrupt:
+            self.running = False
+            logger.warning("\n[!] Interrupção detectada! Parando threads...")
         
         self.running = False
-        logger.info(f"Sessão finalizada. Total processado: {total_processed}")
-        return total_processed
+        logger.info(f"Sessão finalizada. Total baixado/processado: {self.downloaded_count}")
+        return self.downloaded_count
 
 # --- MÉTODOS DE SETUP (CLI) ---
 
@@ -197,15 +236,17 @@ def setup_interactive_cli():
     return api_key, user_id
 
 def main():
-    parser = argparse.ArgumentParser(description="Rule34 Downloader v2.0 - Core Engine")
+    parser = argparse.ArgumentParser(description="Rule34 Downloader v2.1 - Core Engine")
     parser.add_argument("tags", nargs="*", help="Tags de busca")
     parser.add_argument("-o", "--output", default="downloads")
-    parser.add_argument("-l", "--limit", type=int, default=1000)
+    parser.add_argument("-l", "--limit", type=int, default=1000, help="Limite de posts por página da API")
+    parser.add_argument("-n", "--total", type=int, default=0, help="Quantidade exata para baixar (0 = tudo)")
     parser.add_argument("-t", "--threads", type=int, default=10)
     parser.add_argument("-f", "--filter", choices=["all", "images", "videos"], default="all")
+    parser.add_argument("--ignore-blacklist", action="store_true", help="Ignorar o arquivo de blacklist")
     args = parser.parse_args()
 
-    print("\033[95m=== Rule34 Downloader v2.0 ===\033[0m")
+    print("\033[95m=== Rule34 Downloader v2.1 ===\033[0m")
     
     if not os.getenv("R34_API_KEY") or not os.getenv("R34_USER_ID"):
         if input("Credenciais não encontradas. Configurar agora? (y/n): ").lower() == 'y':
@@ -218,7 +259,14 @@ def main():
 
     if not user_tags: return
 
-    downloader = R34Downloader(args.output, args.threads, args.limit, args.filter)
+    downloader = R34Downloader(
+        output_dir=args.output, 
+        threads=args.threads, 
+        page_limit=args.limit, 
+        total_limit=args.total, 
+        file_type=args.filter,
+        ignore_blacklist=args.ignore_blacklist
+    )
     total = downloader.start_download(user_tags)
     
     print(f"\n\033[92mConcluído! {total} arquivos processados.\033[0m")

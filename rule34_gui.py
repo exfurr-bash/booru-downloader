@@ -4,7 +4,8 @@ import subprocess
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QProgressBar, QTextEdit, QScrollArea,
-    QLabel, QGridLayout, QFrame, QSpinBox, QDialog, QFormLayout, QComboBox
+    QLabel, QGridLayout, QFrame, QSpinBox, QDialog, QFormLayout, QComboBox,
+    QCheckBox
 )
 from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtGui import QPixmap, QFont
@@ -16,14 +17,21 @@ class DownloadWorker(QThread):
     image_signal = Signal(str)
     finished_signal = Signal(int)
 
-    def __init__(self, tags, output_dir, threads, limit, file_type):
+    def __init__(self, tags, output_dir, threads, total_limit, file_type, ignore_blacklist):
         super().__init__()
         self.tags = tags
         self.output_dir = output_dir
         self.threads = threads
-        self.limit = limit
+        self.total_limit = total_limit
         self.file_type = file_type
-        self.downloader = R34Downloader(output_dir, threads, limit, file_type)
+        self.ignore_blacklist = ignore_blacklist
+        self.downloader = R34Downloader(
+            output_dir=output_dir, 
+            threads=threads, 
+            total_limit=total_limit, 
+            file_type=file_type,
+            ignore_blacklist=ignore_blacklist
+        )
 
     def run(self):
         try:
@@ -143,10 +151,19 @@ class MainWindow(QMainWindow):
         
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(1, 10000)
-        self.limit_spin.setValue(1000)
-        self.limit_spin.setPrefix("Limit: ")
+        self.limit_spin.setValue(100)
+        self.limit_spin.setPrefix("Quantity: ")
         self.limit_spin.setMinimumHeight(30)
         settings_layout.addWidget(self.limit_spin)
+        
+        self.mass_download_check = QCheckBox("Download All")
+        self.mass_download_check.setStyleSheet("color: white;")
+        self.mass_download_check.toggled.connect(self.limit_spin.setDisabled)
+        settings_layout.addWidget(self.mass_download_check)
+
+        self.ignore_blacklist_check = QCheckBox("Ignore Blacklist")
+        self.ignore_blacklist_check.setStyleSheet("color: white;")
+        settings_layout.addWidget(self.ignore_blacklist_check)
         
         self.type_filter = QComboBox()
         self.type_filter.addItems(["All Files", "Images Only", "Videos Only"])
@@ -274,19 +291,34 @@ class MainWindow(QMainWindow):
         self.log_area.clear()
         self.clear_images()
         self.progress_bar.setValue(0)
-        self.progress_bar.setRange(0, self.limit_spin.value())
+        
+        is_mass_download = self.mass_download_check.isChecked()
+        total_limit = 0 if is_mass_download else self.limit_spin.value()
+        ignore_blacklist = self.ignore_blacklist_check.isChecked()
+
+        if is_mass_download:
+            self.progress_bar.setRange(0, 0) # Marquee mode for indefinite
+        else:
+            self.progress_bar.setRange(0, total_limit)
+        
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         
         threads = self.threads_spin.value()
-        limit = self.limit_spin.value()
         
         # Get filter
         filter_map = {0: "all", 1: "images", 2: "videos"}
         file_type = filter_map.get(self.type_filter.currentIndex(), "all")
         
         # Start worker
-        self.worker = DownloadWorker(tags, self.output_dir, threads=threads, limit=limit, file_type=file_type)
+        self.worker = DownloadWorker(
+            tags, 
+            self.output_dir, 
+            threads=threads, 
+            total_limit=total_limit, 
+            file_type=file_type,
+            ignore_blacklist=ignore_blacklist
+        )
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.log_signal.connect(self.log_message)
         self.worker.image_signal.connect(self.add_image)
@@ -300,6 +332,8 @@ class MainWindow(QMainWindow):
             self.worker.stop()
             self.log_message("[!] Enviando comando de parada...")
             self.stop_btn.setEnabled(False)
+            self.start_btn.setText("STOPPING...")
+            self.start_btn.setStyleSheet("background-color: #555; font-weight: bold; color: white; border: none;")
 
     def update_progress(self, val):
         self.progress_bar.setValue(self.progress_bar.value() + 1) # Just increment
@@ -330,9 +364,15 @@ class MainWindow(QMainWindow):
 
     def download_finished(self, total):
         self.start_btn.setEnabled(True)
+        self.start_btn.setText("SEARCH & DOWNLOAD")
+        self.start_btn.setStyleSheet("background-color: #0078d4; font-weight: bold; color: white; border: none;")
         self.stop_btn.setEnabled(False)
-        self.log_message(f"--- Fim! Total: {total} ---")
-        self.progress_bar.setValue(100)
+        self.log_message(f"--- Sessão finalizada! Total: {total} ---")
+        if self.progress_bar.maximum() > 0: # Check if not in marquee mode
+             self.progress_bar.setValue(self.progress_bar.maximum())
+        else:
+             self.progress_bar.setRange(0, 100)
+             self.progress_bar.setValue(100)
 
     def open_downloads(self):
         path = os.path.abspath(self.output_dir)

@@ -18,7 +18,7 @@ output/
 *.tar.gz
 *.rar
 *.7z
-
+*download*
 # ===============================
 # 🧠 Arquivos pessoais / listas locais
 # ===============================
