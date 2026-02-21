@@ -26,14 +26,14 @@ except ImportError:
         def set_description(self, desc): pass
         def close(self): pass
 
+try:
+    from dotenv import load_dotenv, set_key
+except ImportError:
+    def load_dotenv(): pass
+    def set_key(*args, **kwargs): pass
 
-if load_dotenv:
-    load_dotenv()
-else:
-    logger.warning(".env não carregado, credenciais podem não funcionar.")
 # Carrega variáveis
 load_dotenv()
-
 # --- NÚCLEO DO DOWNLOADER ---
 
 class R34Downloader:
