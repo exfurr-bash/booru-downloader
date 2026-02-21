@@ -11,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("downloader.log", encoding='utf-8'),
+        logging.FileHandler("logs.txt", encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -26,11 +26,11 @@ except ImportError:
         def set_description(self, desc): pass
         def close(self): pass
 
-try:
-    from dotenv import load_dotenv, set_key
-except ImportError:
-    def load_dotenv(): pass
 
+if load_dotenv:
+    load_dotenv()
+else:
+    logger.warning(".env não carregado, credenciais podem não funcionar.")
 # Carrega variáveis
 load_dotenv()
 
