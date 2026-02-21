@@ -92,7 +92,7 @@ O script também suporta migração do arquivo antigo `api.txt`.
 Adicione tags que **não devem ser baixadas** no arquivo:
 
 ```
-disgustingthings-aka-blacklist.txt
+blacklist.txt
 ```
 
 ---
