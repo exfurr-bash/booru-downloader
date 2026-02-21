@@ -1,40 +1,75 @@
-# --- PROJETO RULE34 DOWNLOADER ---
-
-# 1. Arquivos de Credenciais (MUITO IMPORTANTE)
-# Nunca suba esses arquivos para o GitHub!
+# ===============================
+# 🔒 Credenciais e dados sensíveis
+# ===============================
 .env
+.env.*
+!.env.example
 api.txt
+*.key
+*.pem
 
-# 2. Pasta de Downloads (Evita subir Gigabytes de mídia)
+# ===============================
+# 📦 Downloads / Output pesado
+# ===============================
 downloads/
 output/
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
 
-# 3. Listas Pessoais
-# Se você quer que sua blacklist seja pública, remova a linha abaixo.
-# Mas geralmente é melhor manter privado para não "julgar" seus gostos no repo.
+# ===============================
+# 🧠 Arquivos pessoais / listas locais
+# ===============================
 disgustingthings-aka-blacklist.txt
 
-# 4. Python & Cache
+# ===============================
+# 🐍 Python
+# ===============================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info/
+dist/
+build/
 .python-version
+
+# Ambientes virtuais
 .venv/
 venv/
 env/
-.env.local
-.env.*.local
 
-# 5. Arquivos de Editores e Sistema
+# ===============================
+# 🧪 Testes / cobertura
+# ===============================
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ===============================
+# 🧾 Logs
+# ===============================
+*.log
+
+# ===============================
+# 🖥️ Editores
+# ===============================
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+
+# ===============================
+# 💾 Sistema
+# ===============================
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# 6. Logs e Temporários
-*.log
-/home/exfurr/.gemini/tmp/
+# ===============================
+# 🤖 Coisas específicas da sua máquina
+# ===============================
+.gemini/

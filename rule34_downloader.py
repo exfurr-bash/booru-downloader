@@ -3,14 +3,25 @@ import requests
 import urllib.parse
 import sys
 import argparse
+import logging
 from concurrent.futures import ThreadPoolExecutor
+
+# --- CONFIGURAÇÃO DE LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("downloader.log", encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 try:
     from tqdm import tqdm
 except ImportError:
-    # Robust fallback if tqdm is missing
     class tqdm:
-        def __init__(self, total=None, desc=None, unit=None, leave=True):
-            self.total = total
+        def __init__(self, *args, **kwargs): pass
         def update(self, n=1): pass
         def set_description(self, desc): pass
         def close(self): pass
@@ -20,169 +31,198 @@ try:
 except ImportError:
     def load_dotenv(): pass
 
-# Load environment variables
+# Carrega variáveis
 load_dotenv()
 
-# Constants
-ENV_FILE = ".env"
-BLACKLIST_FILE = "disgustingthings-aka-blacklist.txt"
+# --- NÚCLEO DO DOWNLOADER ---
 
-def get_credentials():
-    """Fetches credentials from .env, environment variables, or interactive input."""
-    api_key = os.getenv("R34_API_KEY")
-    user_id = os.getenv("R34_USER_ID")
+class R34Downloader:
+    def __init__(self, output_dir="downloads", threads=10, limit=1000, file_type="all"):
+        self.output_dir = output_dir
+        self.threads = threads
+        self.limit = limit
+        self.file_type = file_type # "all", "images", "videos"
+        self.api_key = os.getenv("R34_API_KEY")
+        self.user_id = os.getenv("R34_USER_ID")
+        self.blacklist_file = "disgustingthings-aka-blacklist.txt"
+        self.running = False
 
-    if api_key and user_id:
-        return api_key, user_id
+    def get_blacklist(self):
+        if not os.path.exists(self.blacklist_file): return ""
+        try:
+            with open(self.blacklist_file, "r") as f:
+                tags = f.read().split()
+                return " ".join([f"-{tag}" for tag in tags])
+        except Exception as e:
+            logger.warning(f"Erro ao ler blacklist: {e}")
+            return ""
 
-    # Fallback/Migration: Check old api.txt
-    if not api_key or not user_id:
-        if os.path.exists("api.txt"):
-            try:
-                with open("api.txt", "r") as f:
-                    content = f.read().strip().lstrip('&')
-                    params = urllib.parse.parse_qs(content)
-                    api_key = api_key or params.get('api_key', [None])[0]
-                    user_id = user_id or params.get('user_id', [None])[0]
-                    if api_key and user_id:
-                        print(f"[*] Migrating api.txt to {ENV_FILE}...")
-                        try:
-                            with open(ENV_FILE, "a"): pass
-                            set_key(ENV_FILE, "R34_API_KEY", api_key)
-                            set_key(ENV_FILE, "R34_USER_ID", user_id)
-                        except: pass
-            except: pass
-
-    if not api_key or not user_id:
-        print("\n--- Setup Interativo Rule34 ---")
-        print("Você pode encontrar suas chaves em: https://rule34.xxx/index.php?page=account&s=options")
+    def fetch_page(self, tags, pid):
+        params = {
+            "page": "dapi", "s": "post", "q": "index", "tags": tags,
+            "limit": self.limit, "pid": pid, "json": 1
+        }
         
-        choice = input("Configurar credenciais agora? (y/N): ").lower()
-        if choice == 'y':
-            user_id = input("user_id: ").strip()
-            api_key = input("api_key: ").strip()
-            save = input(f"Salvar em {ENV_FILE}? (y/N): ").lower()
-            if save == 'y':
-                try:
-                    with open(ENV_FILE, "a"): pass
-                    set_key(ENV_FILE, "R34_API_KEY", api_key)
-                    set_key(ENV_FILE, "R34_USER_ID", user_id)
-                except:
-                    with open(ENV_FILE, "w") as f:
-                        f.write(f"R34_API_KEY={api_key}\nR34_USER_ID={user_id}\n")
-                print(f"[*] Credenciais salvas!")
-        else:
-            print("[!] Prosseguindo de forma anônima (limites de taxa reduzidos).")
-            return None, None
+        # Só adiciona se ambos existirem e não forem vazios
+        if self.api_key and self.user_id:
+            params["api_key"], params["user_id"] = self.api_key, self.user_id
+
+        headers = {"User-Agent": "Rule34Downloader/2.0"}
+        try:
+            url = "https://api.rule34.xxx/index.php"
+            # Log da URL para depuração (sem mostrar a API KEY inteira)
+            safe_tags = urllib.parse.quote(tags)
+            logger.debug(f"Acessando: {url}?page=dapi&s=post&q=index&tags={safe_tags}&pid={pid}")
             
-    return api_key, user_id
+            response = requests.get(url, params=params, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                # A API às vezes retorna um dicionário com 'success': false se houver erro
+                if isinstance(data, dict) and data.get("success") is False:
+                    logger.error(f"Erro na API: {data.get('message', 'Erro desconhecido')}")
+                    return []
+                return data
+            else:
+                logger.error(f"Erro HTTP {response.status_code} na página {pid}")
+        except Exception as e:
+            logger.error(f"Erro ao buscar página {pid}: {e}")
+        return []
 
-def get_blacklist():
-    """Reads the blacklist file and formats tags for the API query."""
-    if not os.path.exists(BLACKLIST_FILE):
-        return ""
-    try:
-        with open(BLACKLIST_FILE, "r") as f:
-            tags = f.read().split()
-            return " ".join([f"-{tag}" for tag in tags])
-    except:
-        return ""
+    def save_post(self, post, pbar=None, log_callback=None, image_callback=None):
+        if not self.running or not isinstance(post, dict):
+            return
+        file_url = post.get('file_url')
+        if not file_url: return
 
-def download_page(tags, pid, api_key, user_id, limit=1000):
-    """Fetches a single page of post metadata."""
-    params = {
-        "page": "dapi", "s": "post", "q": "index", "tags": tags,
-        "limit": limit, "pid": pid, "json": 1
-    }
-    if api_key and user_id:
-        params["api_key"], params["user_id"] = api_key, user_id
-
-    headers = {"User-Agent": "Rule34Downloader/1.5"}
-    try:
-        response = requests.get("https://api.rule34.xxx/index.php", params=params, headers=headers, timeout=15)
-        if response.status_code == 200:
-            return response.json()
-    except: pass
-    return []
-
-def save_image(post, download_dir, pbar=None):
-    """Downloads and saves an image/video from a post object."""
-    file_url = post.get('file_url')
-    if not file_url:
-        return
-
-    ext = os.path.splitext(file_url)[1]
-    filename = os.path.join(download_dir, f"{post.get('id')}{ext}")
-
-    if os.path.exists(filename):
-        if pbar: pbar.update(1)
-        return
-
-    try:
-        headers = {"User-Agent": "Rule34Downloader/1.5"}
-        response = requests.get(file_url, stream=True, headers=headers, timeout=15)
-        if response.status_code == 200:
-            with open(filename, 'wb') as f:
-                for chunk in response.iter_content(8192):
-                    f.write(chunk)
-    except: pass
-    finally:
-        if pbar: pbar.update(1)
-
-def main():
-    parser = argparse.ArgumentParser(description="Downloader profissional para Rule34.xxx")
-    parser.add_argument("tags", nargs="*", help="Tags de busca (ex: cat_ears high_res)")
-    parser.add_argument("-o", "--output", default="downloads", help="Pasta de destino (default: downloads)")
-    parser.add_argument("-l", "--limit", type=int, default=1000, help="Máximo de posts por página (max 1000)")
-    parser.add_argument("-t", "--threads", type=int, default=10, help="Número de downloads simultâneos (default: 10)")
-    args = parser.parse_args()
-
-    print("\033[95m=== Rule34 Downloader v1.5 ===\033[0m")
-    
-    api_key, user_id = get_credentials()
-    
-    user_tags = " ".join(args.tags)
-    if not user_tags:
-        print("\n\033[93mEntrada manual:\033[0m")
-        user_tags = input("Tags para baixar: ").strip()
-        if not user_tags:
-            print("Nenhuma tag fornecida. Encerrando.")
+        ext = os.path.splitext(file_url)[1].lower()
+        
+        # Filtro de tipo
+        is_video = ext in ['.mp4', '.webm', '.mov']
+        if self.file_type == "images" and is_video:
+            if pbar: pbar.update(1)
+            return
+        if self.file_type == "videos" and not is_video:
+            if pbar: pbar.update(1)
             return
 
-    blacklist_tags = get_blacklist()
-    full_query = f"{user_tags} {blacklist_tags}".strip()
-    os.makedirs(args.output, exist_ok=True)
+        post_id = post.get('id')
+        filename = os.path.join(self.output_dir, f"{post_id}{ext}")
 
-    print(f"[*] Buscando: {user_tags}")
-    if blacklist_tags: print(f"[*] Blacklist ativa de: {BLACKLIST_FILE}")
+        if os.path.exists(filename):
+            if pbar: pbar.update(1)
+            if image_callback: image_callback(filename)
+            return
 
-    pid = 0
-    total_processed = 0
+        try:
+            headers = {"User-Agent": "Rule34Downloader/2.0"}
+            response = requests.get(file_url, stream=True, headers=headers, timeout=20)
+            if response.status_code == 200:
+                with open(filename, 'wb') as f:
+                    for chunk in response.iter_content(8192):
+                        f.write(chunk)
+                msg = f"Sucesso: {post_id}{ext}"
+                logger.info(msg)
+                if log_callback: log_callback(msg)
+                if image_callback: image_callback(filename)
+            else:
+                msg = f"Falha HTTP {response.status_code}: {post_id}"
+                logger.warning(msg)
+                if log_callback: log_callback(msg)
+        except Exception as e:
+            msg = f"Erro no download {post_id}: {str(e)}"
+            logger.error(msg)
+            if log_callback: log_callback(msg)
+        finally:
+            if pbar: pbar.update(1)
+
+    def start_download(self, user_tags, log_callback=None, progress_callback=None, image_callback=None):
+        self.running = True
+        os.makedirs(self.output_dir, exist_ok=True)
+        full_query = f"{user_tags} {self.get_blacklist()}".strip()
+        
+        if self.api_key and self.user_id:
+            logger.info(f"Sessão iniciada com credenciais (User ID: {self.user_id[:3]}...)")
+        else:
+            logger.info("Sessão iniciada em modo ANÔNIMO.")
+        
+        logger.info(f"Busca iniciada para: {user_tags}")
+        
+        pid = 0
+        total_processed = 0
+        
+        with ThreadPoolExecutor(max_workers=self.threads) as executor:
+            while self.running:
+                posts = self.fetch_page(full_query, pid)
+                if not posts or not isinstance(posts, list):
+                    logger.info("Fim dos resultados da API.")
+                    break
+
+                logger.info(f"Página {pid}: {len(posts)} posts encontrados.")
+                if log_callback:
+                    log_callback(f"[*] Página {pid}: Baixando {len(posts)} posts...")
+                
+                futures = [executor.submit(self.save_post, p, None, log_callback, image_callback) for p in posts]
+                
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Erro em thread de download: {e}")
+                    if progress_callback:
+                        progress_callback(1)
+
+                total_processed += len(posts)
+                pid += 1
+        
+        self.running = False
+        logger.info(f"Sessão finalizada. Total processado: {total_processed}")
+        return total_processed
+
+# --- MÉTODOS DE SETUP (CLI) ---
+
+def setup_interactive_cli():
+    print("\n--- Setup Interativo Rule34 ---")
+    user_id = input("user_id: ").strip()
+    api_key = input("api_key: ").strip()
+    if input("Salvar em .env? (y/n): ").lower() == 'y':
+        try:
+            with open(".env", "a"): pass
+            set_key(".env", "R34_API_KEY", api_key)
+            set_key(".env", "R34_USER_ID", user_id)
+            print("[*] Credenciais salvas!")
+        except:
+            with open(".env", "w") as f:
+                f.write(f"R34_API_KEY={api_key}\nR34_USER_ID={user_id}\n")
+    return api_key, user_id
+
+def main():
+    parser = argparse.ArgumentParser(description="Rule34 Downloader v2.0 - Core Engine")
+    parser.add_argument("tags", nargs="*", help="Tags de busca")
+    parser.add_argument("-o", "--output", default="downloads")
+    parser.add_argument("-l", "--limit", type=int, default=1000)
+    parser.add_argument("-t", "--threads", type=int, default=10)
+    parser.add_argument("-f", "--filter", choices=["all", "images", "videos"], default="all")
+    args = parser.parse_args()
+
+    print("\033[95m=== Rule34 Downloader v2.0 ===\033[0m")
     
-    with ThreadPoolExecutor(max_workers=args.threads) as executor:
-        while True:
-            posts = download_page(full_query, pid, api_key, user_id, args.limit)
-            if not posts:
-                print("\033[92m[✓] Fim dos resultados ou galeria completa.\033[0m")
-                break
+    if not os.getenv("R34_API_KEY") or not os.getenv("R34_USER_ID"):
+        if input("Credenciais não encontradas. Configurar agora? (y/n): ").lower() == 'y':
+            setup_interactive_cli()
+            load_dotenv()
 
-            pbar = tqdm(total=len(posts), desc=f"Página {pid}", unit="post", leave=False)
-            
-            # Submete downloads em paralelo
-            futures = [executor.submit(save_image, post, args.output, pbar) for post in posts]
-            # Espera a página atual terminar para não inundar de threads infinitas
-            for f in futures: f.result()
-            
-            pbar.close()
-            total_processed += len(posts)
-            print(f"[*] Processado Página {pid} ({total_processed} entradas totais)")
-            pid += 1
+    user_tags = " ".join(args.tags)
+    if not user_tags:
+        user_tags = input("Tags: ").strip()
 
-    print(f"\n\033[92mConcluído! {total_processed} imagens processadas na pasta '{args.output}'.\033[0m")
+    if not user_tags: return
+
+    downloader = R34Downloader(args.output, args.threads, args.limit, args.filter)
+    total = downloader.start_download(user_tags)
+    
+    print(f"\n\033[92mConcluído! {total} arquivos processados.\033[0m")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\n\033[91mEncerrado pelo usuário.\033[0m")
-        sys.exit(0)
+    try: main()
+    except KeyboardInterrupt: sys.exit(0)
