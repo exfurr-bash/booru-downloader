@@ -1,0 +1,40 @@
+# --- PROJETO RULE34 DOWNLOADER ---
+
+# 1. Arquivos de Credenciais (MUITO IMPORTANTE)
+# Nunca suba esses arquivos para o GitHub!
+.env
+api.txt
+
+# 2. Pasta de Downloads (Evita subir Gigabytes de mídia)
+downloads/
+output/
+
+# 3. Listas Pessoais
+# Se você quer que sua blacklist seja pública, remova a linha abaixo.
+# Mas geralmente é melhor manter privado para não "julgar" seus gostos no repo.
+disgustingthings-aka-blacklist.txt
+
+# 4. Python & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.python-version
+.venv/
+venv/
+env/
+.env.local
+.env.*.local
+
+# 5. Arquivos de Editores e Sistema
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 6. Logs e Temporários
+*.log
+/home/exfurr/.gemini/tmp/
