@@ -73,3 +73,7 @@ desktop.ini
 # 🤖 Coisas específicas da sua máquina
 # ===============================
 .gemini/
+# ===============================
+# sla
+# ===============================
+downloader.logssa
