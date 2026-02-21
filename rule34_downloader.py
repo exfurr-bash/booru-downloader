@@ -44,7 +44,7 @@ class R34Downloader:
         self.file_type = file_type # "all", "images", "videos"
         self.api_key = os.getenv("R34_API_KEY")
         self.user_id = os.getenv("R34_USER_ID")
-        self.blacklist_file = "disgustingthings-aka-blacklist.txt"
+        self.blacklist_file = "blacklist.txt"
         self.running = False
 
     def get_blacklist(self):
