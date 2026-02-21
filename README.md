@@ -97,6 +97,13 @@ blacklist.txt
 
 ---
 
+
+###  Dicas de Uso
+- Para ver seu ID e Chave API, acesse: [https://rule34.xxx/index.php?page=account&s=options](https://rule34.xxx/index.php?page=account&s=options)
+
+---
+
+
 ## Aviso Legal
 
 Use esta ferramenta de acordo com os termos de serviço do site alvo. O autor não se responsabiliza pelo uso indevido da ferramenta.
