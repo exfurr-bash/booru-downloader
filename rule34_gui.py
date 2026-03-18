@@ -5,11 +5,36 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QProgressBar, QTextEdit, QScrollArea,
     QLabel, QGridLayout, QFrame, QSpinBox, QDialog, QFormLayout, QComboBox,
-    QCheckBox
+    QCheckBox, QCompleter
 )
-from PySide6.QtCore import Qt, QThread, Signal, QSize
-from PySide6.QtGui import QPixmap, QFont
-from rule34_downloader import R34Downloader
+from PySide6.QtCore import Qt, QThread, Signal, QRunnable, QThreadPool, QObject, QStringListModel, QTimer
+from PySide6.QtGui import QPixmap, QFont, QImage
+from core.engine import R34Downloader
+
+class ImageLoaderSignals(QObject):
+    finished = Signal(QPixmap, str)
+
+class ImageLoader(QRunnable):
+    def __init__(self, file_path, target_size=(160, 160)):
+        super().__init__()
+        self.file_path = file_path
+        self.target_size = target_size
+        self.signals = ImageLoaderSignals()
+
+    def run(self):
+        try:
+            # Carregamento pesado fora da thread principal
+            image = QImage(self.file_path)
+            if not image.isNull():
+                pixmap = QPixmap.fromImage(image.scaled(
+                    self.target_size[0], 
+                    self.target_size[1], 
+                    Qt.KeepAspectRatio, 
+                    Qt.SmoothTransformation
+                ))
+                self.signals.finished.emit(pixmap, self.file_path)
+        except Exception as e:
+            print(f"Error loading image {self.file_path}: {e}")
 
 class DownloadWorker(QThread):
     progress_signal = Signal(int)
@@ -57,25 +82,22 @@ class ImageWidget(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         
+        self.file_path = file_path
         ext = os.path.splitext(file_path)[1].lower()
-        is_video = ext in ['.mp4', '.webm', '.mov']
+        self.is_video = ext in ['.mp4', '.webm', '.mov']
         
         # Image / Placeholder
         self.image_label = QLabel()
         self.image_label.setFixedSize(160, 160)
-        self.image_label.setScaledContents(True)
+        self.image_label.setScaledContents(False) # Mudado para False para controle manual
         self.image_label.setAlignment(Qt.AlignCenter)
         
-        if is_video:
+        if self.is_video:
             self.image_label.setText("🎥 VIDEO")
             self.image_label.setStyleSheet("background-color: #444; color: #fff; font-weight: bold; font-size: 16px; border-radius: 4px;")
         else:
-            pixmap = QPixmap(file_path)
-            if not pixmap.isNull():
-                self.image_label.setPixmap(pixmap.scaled(160, 160, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                self.image_label.setText("No Preview")
-                self.image_label.setStyleSheet("background-color: #333; color: #777; border-radius: 4px;")
+            self.image_label.setText("Loading...")
+            self.image_label.setStyleSheet("background-color: #222; color: #555; border-radius: 4px;")
         
         layout.addWidget(self.image_label)
         
@@ -93,6 +115,57 @@ class ImageWidget(QFrame):
         self.info_label.setStyleSheet("font-size: 10px; color: #ccc;")
         layout.addWidget(self.info_label)
 
+    def set_pixmap(self, pixmap):
+        if not self.is_video:
+            self.image_label.setText("")
+            self.image_label.setPixmap(pixmap)
+            self.image_label.setStyleSheet("background-color: transparent; border-radius: 4px;")
+
+class TagEdit(QLineEdit):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._completer = None
+
+    def setCompleter(self, completer):
+        if self._completer:
+            self._completer.activated.disconnect()
+        self._completer = completer
+        if not self._completer:
+            return
+        self._completer.setWidget(self)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.activated.connect(self.insert_completion)
+
+    def insert_completion(self, completion):
+        if self._completer.widget() is not self:
+            return
+        
+        words = self.text().split()
+        if not words:
+            self.setText(completion + " ")
+            return
+        
+        # Substituir apenas a última palavra parcial
+        words[-1] = completion
+        self.setText(" ".join(words) + " ")
+        self.setFocus()
+
+    def text_under_cursor(self):
+        text = self.text()
+        pos = self.cursorPosition()
+        before_cursor = text[:pos]
+        words = before_cursor.split()
+        if not words:
+            return ""
+        return words[-1]
+
+    def keyPressEvent(self, event):
+        if self._completer and self._completer.popup().isVisible():
+            if event.key() in (Qt.Key_Enter, Qt.Key_Return, Qt.Key_Escape, Qt.Key_Tab, Qt.Key_Backtab):
+                event.ignore()
+                return
+        super().keyPressEvent(event)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -100,8 +173,128 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
         
         self.output_dir = "downloads"
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(4) # Limitar threads de renderização para não travar CPU
+        
+        # Engine para Autocomplete
+        self.engine = R34Downloader()
+        self.completer_model = QStringListModel()
+        self.completer = QCompleter()
+        self.completer.setModel(self.completer_model)
+        self.completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.completer.setCaseSensitivity(Qt.CaseInsensitive)
+        
+        # Timer para evitar muitas requisições no autocomplete
+        self.autocomplete_timer = QTimer()
+        self.autocomplete_timer.setSingleShot(True)
+        self.autocomplete_timer.timeout.connect(self.update_autocomplete)
+
         self.setup_ui()
         self.worker = None
+
+    def apply_theme(self, theme_name):
+        themes = {
+            "Dark Elite": """
+                QMainWindow { background-color: #1a1a1a; }
+                QWidget#ImageContainer { background-color: #121212; }
+                QFrame#HeaderFrame { background-color: #252525; border-radius: 8px; }
+                QLineEdit, QSpinBox, QComboBox { background-color: #333; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 5px; }
+                QPushButton { background-color: #3a3a3a; color: #fff; border-radius: 6px; }
+                QPushButton:hover { background-color: #4a4a4a; }
+                QProgressBar { background-color: #333; border: none; border-radius: 4px; }
+                QProgressBar::chunk { background-color: #0078d4; }
+                QTextEdit { background-color: #1e1e1e; color: #00ff00; border: 1px solid #333; font-family: 'Consolas'; }
+            """,
+            "Cyberpunk Neon": """
+                QMainWindow { background-color: #0d0221; }
+                QWidget#ImageContainer { background-color: #050110; }
+                QFrame#HeaderFrame { background-color: #0d0221; border: 2px solid #ff00ff; border-radius: 0px; }
+                QLineEdit, QSpinBox, QComboBox { 
+                    background-color: #0d0221; color: #00ffff; border: 1px solid #00ffff; border-radius: 0px; 
+                    font-family: 'Impact'; font-size: 14px;
+                }
+                QPushButton { 
+                    background-color: #ff00ff; color: #fff; border-radius: 0px; font-weight: bold; 
+                    border-bottom: 4px solid #800080; 
+                }
+                QPushButton:hover { background-color: #ff55ff; border-bottom: 2px solid #800080; }
+                QProgressBar { background-color: #1a0033; border: 1px solid #ff00ff; border-radius: 0px; }
+                QProgressBar::chunk { background-color: #00ffff; }
+                QTextEdit { 
+                    background-color: #050110; color: #ff00ff; border: 1px solid #00ffff; 
+                    font-family: 'Courier New'; font-weight: bold;
+                }
+                QLabel { color: #00ffff; text-transform: uppercase; font-weight: bold; }
+            """,
+            "Retro Hacker": """
+                QMainWindow { background-color: #000; }
+                QWidget#ImageContainer { background-color: #000; border: 2px solid #00ff00; }
+                QFrame#HeaderFrame { background-color: #000; border-bottom: 2px solid #00ff00; }
+                QLineEdit, QSpinBox, QComboBox { 
+                    background-color: #000; color: #00ff00; border: 1px solid #00ff00; 
+                    font-family: 'Courier New'; font-size: 12px;
+                }
+                QPushButton { 
+                    background-color: #000; color: #00ff00; border: 2px solid #00ff00; 
+                    font-family: 'Courier New'; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #004400; }
+                QProgressBar { background-color: #000; border: 1px solid #00ff00; }
+                QProgressBar::chunk { background-color: #00ff00; }
+                QTextEdit { background-color: #000; color: #00ff00; border: 1px solid #00ff00; }
+                QLabel { color: #00ff00; font-family: 'Courier New'; }
+            """,
+            "Nordic Frost": """
+                QMainWindow { background-color: #eceff4; }
+                QWidget#ImageContainer { background-color: #fff; border-radius: 15px; margin: 10px; }
+                QFrame#HeaderFrame { background-color: #e5e9f0; border-radius: 20px; border: 1px solid #d8dee9; }
+                QLineEdit, QSpinBox, QComboBox { 
+                    background-color: #fff; color: #2e3440; border: 1px solid #d8dee9; 
+                    border-radius: 10px; padding: 8px;
+                }
+                QPushButton { 
+                    background-color: #88c0d0; color: #fff; border-radius: 12px; font-weight: 500;
+                }
+                QPushButton:hover { background-color: #81a1c1; }
+                QProgressBar { background-color: #d8dee9; border-radius: 10px; height: 12px; }
+                QProgressBar::chunk { background-color: #81a1c1; border-radius: 10px; }
+                QTextEdit { background-color: #fff; color: #4c566a; border-radius: 10px; border: 1px solid #d8dee9; }
+                QLabel { color: #4c566a; }
+            """,
+            "Amoled": """
+                QMainWindow { background-color: #000000; }
+                QWidget#ImageContainer { background-color: #000000; }
+                QFrame#HeaderFrame { background-color: #000000; border: 1px solid #222; border-radius: 0px; }
+                QLineEdit, QSpinBox, QComboBox { 
+                    background-color: #000; color: #fff; border: 1px solid #333; 
+                    border-radius: 0px;
+                }
+                QPushButton { background-color: #111; color: #fff; border: 1px solid #333; border-radius: 0px; }
+                QPushButton:hover { background-color: #222; }
+                QProgressBar { background-color: #111; border: none; }
+                QProgressBar::chunk { background-color: #fff; }
+                QTextEdit { background-color: #000; color: #aaa; border: 1px solid #222; }
+                QLabel { color: #888; }
+            """
+        }
+        
+        style = themes.get(theme_name, themes["Dark Elite"])
+        self.setStyleSheet(style)
+        
+        # Atualizar widgets específicos que precisam de estilo manual
+        for i in range(self.image_grid.count()):
+            widget = self.image_grid.itemAt(i).widget()
+            if widget:
+                if theme_name == "Cyberpunk Neon":
+                    widget.setStyleSheet("background-color: #0d0221; border: 1px solid #00ffff; border-radius: 0px;")
+                elif theme_name == "Retro Hacker":
+                    widget.setStyleSheet("background-color: #000; border: 1px solid #00ff00; border-radius: 0px;")
+                elif theme_name == "Nordic Frost":
+                    widget.setStyleSheet("background-color: #fff; border: 1px solid #d8dee9; border-radius: 15px;")
+                elif theme_name == "Amoled":
+                    widget.setStyleSheet("background-color: #000; border: 1px solid #222; border-radius: 0px;")
+                else:
+                    widget.setStyleSheet("background-color: #222; border-radius: 8px;")
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -115,11 +308,13 @@ class MainWindow(QMainWindow):
         header_layout = QVBoxLayout(header_frame)
         
         search_layout = QHBoxLayout()
-        self.tag_input = QLineEdit()
+        self.tag_input = TagEdit()
         self.tag_input.setPlaceholderText("Enter tags here... (e.g. cat_ears, solo, high_res)")
         self.tag_input.setMinimumHeight(45)
         self.tag_input.setFont(QFont("Segoe UI", 12))
         self.tag_input.returnPressed.connect(self.start_download)
+        self.tag_input.setCompleter(self.completer)
+        self.tag_input.textChanged.connect(lambda: self.autocomplete_timer.start(500))
         search_layout.addWidget(self.tag_input)
 
         self.start_btn = QPushButton("SEARCH & DOWNLOAD")
@@ -155,6 +350,19 @@ class MainWindow(QMainWindow):
         self.limit_spin.setPrefix("Quantity: ")
         self.limit_spin.setMinimumHeight(30)
         settings_layout.addWidget(self.limit_spin)
+
+        self.score_spin = QSpinBox()
+        self.score_spin.setRange(0, 10000)
+        self.score_spin.setValue(0)
+        self.score_spin.setPrefix("Min Score: ")
+        self.score_spin.setMinimumHeight(30)
+        settings_layout.addWidget(self.score_spin)
+        
+        self.rating_combo = QComboBox()
+        self.rating_combo.addItems(["Any Rating", "Rating: Safe", "Rating: Questionable", "Rating: Explicit"])
+        self.rating_combo.setMinimumHeight(30)
+        self.rating_combo.setStyleSheet("background-color: #333; color: white; border: 1px solid #444; border-radius: 4px; padding: 2px 10px;")
+        settings_layout.addWidget(self.rating_combo)
         
         self.mass_download_check = QCheckBox("Download All")
         self.mass_download_check.setStyleSheet("color: white;")
@@ -168,8 +376,13 @@ class MainWindow(QMainWindow):
         self.type_filter = QComboBox()
         self.type_filter.addItems(["All Files", "Images Only", "Videos Only"])
         self.type_filter.setMinimumHeight(30)
-        self.type_filter.setStyleSheet("background-color: #333; color: white; border: 1px solid #444; border-radius: 4px; padding: 2px 10px;")
         settings_layout.addWidget(self.type_filter)
+
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Dark Elite", "Cyberpunk Neon", "Retro Hacker", "Nordic Frost", "Amoled"])
+        self.theme_combo.setMinimumHeight(30)
+        self.theme_combo.currentTextChanged.connect(self.apply_theme)
+        settings_layout.addWidget(self.theme_combo)
         
         settings_layout.addStretch()
         
@@ -182,6 +395,11 @@ class MainWindow(QMainWindow):
         self.creds_btn.setMinimumHeight(30)
         self.creds_btn.clicked.connect(self.setup_credentials)
         settings_layout.addWidget(self.creds_btn)
+
+        self.blacklist_btn = QPushButton("🚫 Blacklist")
+        self.blacklist_btn.setMinimumHeight(30)
+        self.blacklist_btn.clicked.connect(self.setup_blacklist)
+        settings_layout.addWidget(self.blacklist_btn)
         
         header_layout.addLayout(settings_layout)
         main_layout.addWidget(header_frame)
@@ -225,6 +443,7 @@ class MainWindow(QMainWindow):
         
         self.image_count = 0
         self.columns = 4
+        self.image_widgets = {} # Track widgets by file_path for async updates
 
         # Style
         self.setStyleSheet("""
@@ -287,6 +506,16 @@ class MainWindow(QMainWindow):
         if not tags:
             return
 
+        # Adicionar filtros automáticos
+        score = self.score_spin.value()
+        if score > 0:
+            tags += f" score:>={score}"
+        
+        rating_idx = self.rating_combo.currentIndex()
+        if rating_idx == 1: tags += " rating:safe"
+        elif rating_idx == 2: tags += " rating:questionable"
+        elif rating_idx == 3: tags += " rating:explicit"
+
         # Reset UI
         self.log_area.clear()
         self.clear_images()
@@ -327,6 +556,29 @@ class MainWindow(QMainWindow):
         
         self.log_message(f"[*] Buscando: {tags}")
 
+    def update_autocomplete(self):
+        text = self.tag_input.text()
+        if not text: return
+        
+        last_word = self.tag_input.text_under_cursor()
+        if len(last_word) < 2: 
+            self.completer.popup().hide()
+            return
+
+        try:
+            results = self.engine.autocomplete_tags(last_word)
+            tags = [res.get('value', '') for res in results]
+            if tags:
+                self.completer_model.setStringList(tags)
+                cr = self.tag_input.cursorRect()
+                cr.setWidth(self.completer.popup().sizeHintForColumn(0) 
+                             + self.completer.popup().verticalScrollBar().sizeHint().width())
+                self.completer.complete(cr)
+            else:
+                self.completer.popup().hide()
+        except:
+            pass
+
     def stop_download(self):
         if self.worker:
             self.worker.stop()
@@ -347,12 +599,45 @@ class MainWindow(QMainWindow):
         width = self.scroll_area.width()
         self.columns = max(1, width // 200)
         
+        # Gerenciamento de Memória: Limitar exibição a 100 widgets
+        if self.image_grid.count() >= 100:
+            item = self.image_grid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                if hasattr(widget, 'file_path') and widget.file_path in self.image_widgets:
+                    del self.image_widgets[widget.file_path]
+                widget.setParent(None)
+                widget.deleteLater()
+
         row = self.image_count // self.columns
         col = self.image_count % self.columns
         
         img_widget = ImageWidget(file_path)
+        
+        # Aplicar estilo do tema atual
+        theme_name = self.theme_combo.currentText()
+        if theme_name == "Cyberpunk Neon":
+            img_widget.setStyleSheet("background-color: #0d0221; border: 1px solid #00ffff; border-radius: 0px;")
+        elif theme_name == "Retro Hacker":
+            img_widget.setStyleSheet("background-color: #000; border: 1px solid #00ff00; border-radius: 0px;")
+        elif theme_name == "Nordic Frost":
+            img_widget.setStyleSheet("background-color: #fff; border: 1px solid #d8dee9; border-radius: 15px;")
+        elif theme_name == "Amoled":
+            img_widget.setStyleSheet("background-color: #000; border: 1px solid #222; border-radius: 0px;")
+        
+        self.image_widgets[file_path] = img_widget
         self.image_grid.addWidget(img_widget, row, col)
         self.image_count += 1
+        
+        # Iniciar carregamento assíncrono se não for vídeo
+        if not img_widget.is_video:
+            loader = ImageLoader(file_path)
+            loader.signals.finished.connect(self.on_image_loaded)
+            self.thread_pool.start(loader)
+
+    def on_image_loaded(self, pixmap, file_path):
+        if file_path in self.image_widgets:
+            self.image_widgets[file_path].set_pixmap(pixmap)
 
     def clear_images(self):
         for i in reversed(range(self.image_grid.count())): 
@@ -361,6 +646,7 @@ class MainWindow(QMainWindow):
                 widget.setParent(None)
                 widget.deleteLater()
         self.image_count = 0
+        self.image_widgets.clear()
 
     def download_finished(self, total):
         self.start_btn.setEnabled(True)
@@ -395,6 +681,7 @@ class MainWindow(QMainWindow):
         user_id_input.setPlaceholderText("R34_USER_ID")
         api_key_input = QLineEdit()
         api_key_input.setPlaceholderText("R34_API_KEY")
+        api_key_input.setEchoMode(QLineEdit.Password)
         
         # Load current if possible
         from dotenv import load_dotenv
@@ -428,6 +715,39 @@ class MainWindow(QMainWindow):
                 with open(".env", "w") as f:
                     f.write(f"R34_API_KEY={api_key}\nR34_USER_ID={user_id}\n")
                 self.log_message("[*] Credentials written to .env")
+
+    def setup_blacklist(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Manage Blacklist Tags")
+        dialog.setFixedWidth(500)
+        layout = QVBoxLayout(dialog)
+        
+        info_label = QLabel("Tags separated by spaces/lines. These will be added as -tag to your queries.")
+        info_label.setStyleSheet("color: #aaa; font-style: italic;")
+        layout.addWidget(info_label)
+        
+        text_edit = QTextEdit()
+        # Carregar atual
+        if os.path.exists("blacklist.txt"):
+            with open("blacklist.txt", "r") as f:
+                text_edit.setText(f.read())
+        
+        layout.addWidget(text_edit)
+        
+        btn_box = QHBoxLayout()
+        save_btn = QPushButton("Save Blacklist")
+        save_btn.clicked.connect(dialog.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_box.addWidget(save_btn)
+        btn_box.addWidget(cancel_btn)
+        layout.addLayout(btn_box)
+        
+        if dialog.exec():
+            content = text_edit.toPlainText().strip()
+            with open("blacklist.txt", "w") as f:
+                f.write(content)
+            self.log_message("[*] Blacklist updated.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

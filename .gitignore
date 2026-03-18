@@ -18,10 +18,16 @@ output/
 *.tar.gz
 *.rar
 *.7z
-*download*
+# Ignorar pastas com download no nome, mas não arquivos .py
+*download*/
+!rule34_downloader.py
+test_downloads/
+downloads_test/
+downloads_test_log_check/
 # ===============================
 # 🧠 Arquivos pessoais / listas locais
 # ===============================
+blacklist.txt
 disgustingthings-aka-blacklist.txt
 
 # ===============================
@@ -78,3 +84,4 @@ desktop.ini
 # ===============================
 downloader.logssa
 logs*
+*test*
