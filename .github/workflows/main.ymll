@@ -3,7 +3,8 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*' # Dispara quando você criar uma tag (ex: v1.0.2)
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,45 +31,43 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller rule34_gui.spec
 
-      # Passo importante: renomear os arquivos para não ficarem com o mesmo nome
-      - name: Rename binaries
+      - name: Prepare Artifacts
         shell: bash
         run: |
-          mkdir -p output
+          mkdir -p upload
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv dist/rule34_gui.exe output/rule34_gui-windows.exe
+            mv dist/rule34_gui.exe upload/rule34_gui-windows.exe
           else
-            mv dist/rule34_gui output/rule34_gui-linux
+            mv dist/rule34_gui upload/rule34_gui-linux
           fi
 
-      - name: Upload Artifacts (Internal)
+      # Salva o arquivo temporariamente no GitHub
+      - name: Upload Intermediate Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binary-${{ matrix.os }}
-          path: output/
+          name: bin-${{ matrix.os }}
+          path: upload/
 
   release:
-    name: Create Release
-    needs: build # Só roda se o build terminar com sucesso
+    name: Post Release
+    needs: build  # <--- ESPERA o build terminar nos dois OS
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Necessário para o GitHub permitir criar o Release
+      contents: write
     
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-binaries
+          path: all-bins
           merge-multiple: true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            all-binaries/rule34_gui-windows.exe
-            all-binaries/rule34_gui-linux
-          draft: false
-          prerelease: false
-          generate_release_notes: true # Cria a lista de mudanças automaticamente
+            all-bins/rule34_gui-windows.exe
+            all-bins/rule34_gui-linux
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.PUSH_TOKEN }}
