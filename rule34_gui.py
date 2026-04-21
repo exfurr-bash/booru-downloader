@@ -11,6 +11,23 @@ from PySide6.QtCore import Qt, QThread, Signal, QRunnable, QThreadPool, QObject,
 from PySide6.QtGui import QPixmap, QFont, QImage
 from core.engine import R34Downloader
 
+class AutocompleteWorker(QThread):
+    results_signal = Signal(list)
+
+    def __init__(self, engine, query):
+        super().__init__()
+        self.engine = engine
+        self.query = query
+
+    def run(self):
+        try:
+            results = self.engine.autocomplete_tags(self.query)
+            tags = [res.get('value', '') for res in results]
+            self.results_signal.emit(tags)
+        except Exception as e:
+            print(f"Autocomplete error: {e}")
+            self.results_signal.emit([])
+
 class ImageLoaderSignals(QObject):
     finished = Signal(QPixmap, str)
 
@@ -140,14 +157,22 @@ class TagEdit(QLineEdit):
         if self._completer.widget() is not self:
             return
         
-        words = self.text().split()
-        if not words:
-            self.setText(completion + " ")
-            return
+        text = self.text()
+        pos = self.cursorPosition()
         
-        # Substituir apenas a última palavra parcial
-        words[-1] = completion
-        self.setText(" ".join(words) + " ")
+        # Encontrar a palavra sob o cursor para substituir
+        before = text[:pos]
+        after = text[pos:]
+        
+        words_before = before.split()
+        if not words_before:
+            self.setText(completion + " " + after)
+            return
+
+        words_before[-1] = completion
+        new_before = " ".join(words_before) + " "
+        self.setText(new_before + after)
+        self.setCursorPosition(len(new_before))
         self.setFocus()
 
     def text_under_cursor(self):
@@ -184,10 +209,13 @@ class MainWindow(QMainWindow):
         self.completer.setCompletionMode(QCompleter.PopupCompletion)
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
         
+        # Worker de autocomplete
+        self.autocomplete_worker = None
+        
         # Timer para evitar muitas requisições no autocomplete
         self.autocomplete_timer = QTimer()
         self.autocomplete_timer.setSingleShot(True)
-        self.autocomplete_timer.timeout.connect(self.update_autocomplete)
+        self.autocomplete_timer.timeout.connect(self.request_autocomplete)
 
         self.setup_ui()
         self.worker = None
@@ -556,28 +584,28 @@ class MainWindow(QMainWindow):
         
         self.log_message(f"[*] Buscando: {tags}")
 
-    def update_autocomplete(self):
-        text = self.tag_input.text()
-        if not text: return
-        
+    def request_autocomplete(self):
         last_word = self.tag_input.text_under_cursor()
-        if len(last_word) < 2: 
+        if len(last_word) < 2:
             self.completer.popup().hide()
             return
 
-        try:
-            results = self.engine.autocomplete_tags(last_word)
-            tags = [res.get('value', '') for res in results]
-            if tags:
-                self.completer_model.setStringList(tags)
-                cr = self.tag_input.cursorRect()
-                cr.setWidth(self.completer.popup().sizeHintForColumn(0) 
-                             + self.completer.popup().verticalScrollBar().sizeHint().width())
-                self.completer.complete(cr)
-            else:
-                self.completer.popup().hide()
-        except:
-            pass
+        if self.autocomplete_worker and self.autocomplete_worker.isRunning():
+            self.autocomplete_worker.terminate() 
+
+        self.autocomplete_worker = AutocompleteWorker(self.engine, last_word)
+        self.autocomplete_worker.results_signal.connect(self.display_autocomplete)
+        self.autocomplete_worker.start()
+
+    def display_autocomplete(self, tags):
+        if tags:
+            self.completer_model.setStringList(tags)
+            cr = self.tag_input.cursorRect()
+            cr.setWidth(self.completer.popup().sizeHintForColumn(0) 
+                         + self.completer.popup().verticalScrollBar().sizeHint().width())
+            self.completer.complete(cr)
+        else:
+            self.completer.popup().hide()
 
     def stop_download(self):
         if self.worker:
@@ -586,6 +614,34 @@ class MainWindow(QMainWindow):
             self.stop_btn.setEnabled(False)
             self.start_btn.setText("STOPPING...")
             self.start_btn.setStyleSheet("background-color: #555; font-weight: bold; color: white; border: none;")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.rearrange_images()
+
+    def rearrange_images(self):
+        if not self.image_widgets:
+            return
+            
+        width = self.scroll_area.width()
+        new_columns = max(1, width // 200)
+        
+        if new_columns == self.columns:
+            return
+            
+        self.columns = new_columns
+        
+        # Re-adicionar todos os widgets na nova grade
+        widgets = []
+        for i in range(self.image_grid.count()):
+            item = self.image_grid.takeAt(0)
+            if item.widget():
+                widgets.append(item.widget())
+        
+        for i, widget in enumerate(widgets):
+            row = i // self.columns
+            col = i % self.columns
+            self.image_grid.addWidget(widget, row, col)
 
     def update_progress(self, val):
         self.progress_bar.setValue(self.progress_bar.value() + 1) # Just increment

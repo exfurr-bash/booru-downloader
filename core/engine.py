@@ -75,17 +75,9 @@ class R34Downloader:
         return []
 
     def fetch_page(self, tags: str, pid: int) -> List[Dict[str, Any]]:
-        # Adjust limit for the last page if total_limit is set
-        current_page_limit = self.page_limit
-        with self._lock:
-            if self.total_limit > 0:
-                remaining = self.total_limit - self.downloaded_count
-                if remaining <= 0: return []
-                current_page_limit = min(self.page_limit, remaining)
-
         params = {
             "page": "dapi", "s": "post", "q": "index", "tags": tags,
-            "limit": current_page_limit, "pid": pid, "json": 1
+            "limit": self.page_limit, "pid": pid, "json": 1
         }
         
         if self.api_key and self.user_id:
@@ -94,12 +86,18 @@ class R34Downloader:
         try:
             url = "https://api.rule34.xxx/index.php"
             safe_tags = urllib.parse.quote(tags)
-            logger.debug(f"Acessando: {url}?page=dapi&s=post&q=index&tags={safe_tags}&pid={pid}&limit={current_page_limit}")
+            logger.debug(f"Acessando: {url}?page=dapi&s=post&q=index&tags={safe_tags}&pid={pid}&limit={self.page_limit}")
             
             response = self.session.get(url, params=params, timeout=15)
             
             if response.status_code == 200:
-                data = response.json()
+                try:
+                    data = response.json()
+                except Exception:
+                    # Caso a API retorne algo que não seja JSON (comum em erros graves)
+                    logger.error(f"Resposta inválida da API na página {pid}")
+                    return []
+
                 if isinstance(data, dict) and data.get("success") is False:
                     logger.error(f"Erro na API: {data.get('message', 'Erro desconhecido')}")
                     return []

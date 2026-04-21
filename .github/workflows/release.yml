@@ -8,11 +8,17 @@ on:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build for ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            artifact_name: rule34_gui-windows.exe
+            dist_path: dist/rule34_gui.exe
+          - os: ubuntu-latest
+            artifact_name: rule34_gui-linux
+            dist_path: dist/rule34_gui
 
     steps:
       - uses: actions/checkout@v4
@@ -31,27 +37,29 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller rule34_gui.spec
 
-      - name: Prepare Artifacts
+      - name: Prepare Artifact
         shell: bash
         run: |
           mkdir -p upload
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv dist/rule34_gui.exe upload/rule34_gui-windows.exe
+          # Verifica se o arquivo foi gerado antes de mover
+          if [ -f "${{ matrix.dist_path }}" ]; then
+            mv "${{ matrix.dist_path }}" "upload/${{ matrix.artifact_name }}"
           else
-            mv dist/rule34_gui upload/rule34_gui-linux
+            echo "Error: Binary not found at ${{ matrix.dist_path }}"
+            exit 1
           fi
 
-      # Salva o arquivo temporariamente no GitHub
       - name: Upload Intermediate Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.os }}
+          name: ${{ matrix.artifact_name }}
           path: upload/
 
   release:
-    name: Post Release
-    needs: build  # <--- ESPERA o build terminar nos dois OS
+    name: Create GitHub Release
+    needs: build
     runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write
     
@@ -62,7 +70,7 @@ jobs:
           path: all-bins
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Post Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -70,4 +78,4 @@ jobs:
             all-bins/rule34_gui-linux
           generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.PUSH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

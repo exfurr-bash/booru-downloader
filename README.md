@@ -10,7 +10,9 @@ Booru Downloader é uma ferramenta Python que automatiza o download de imagens d
 
 ## Estrutura do Projeto
 
-* **Turbo Download:** Multithreading com 10 conexões simultâneas para acelerar downloads.
+* **Turbo Download:** Multithreading com threads configuráveis para acelerar downloads.
+* **GUI Moderna:** Interface com múltiplos temas (Cyberpunk, Retro Hacker, etc.) e redimensionamento dinâmico.
+* **Autocomplete Assíncrono:** Sugestões de tags em tempo real sem travar a interface.
 * **Blacklist:** Bloqueio de tags indesejadas via arquivo de configuração (`blacklist.txt`).
 * **Setup Automatizado:** Configuração inicial guiada para credenciais da API via `.env`.
 * **Organização Automática:** Cria e gerencia a pasta `downloads/`, evitando arquivos duplicados.
