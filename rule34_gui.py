@@ -1,11 +1,12 @@
 import sys
 import os
 import subprocess
+import webbrowser
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QProgressBar, QTextEdit, QScrollArea,
     QLabel, QGridLayout, QFrame, QSpinBox, QDialog, QFormLayout, QComboBox,
-    QCheckBox, QCompleter
+    QCheckBox, QCompleter, QMenu
 )
 from PySide6.QtCore import Qt, QThread, Signal, QRunnable, QThreadPool, QObject, QStringListModel, QTimer
 from PySide6.QtGui import QPixmap, QFont, QImage
@@ -91,52 +92,127 @@ class DownloadWorker(QThread):
     def stop(self):
         self.downloader.running = False
 
-class ImageWidget(QFrame):
+class FullscreenViewer(QDialog):
     def __init__(self, file_path, parent=None):
         super().__init__(parent)
-        self.setFrameStyle(QFrame.StyledPanel | QFrame.Sunken)
-        self.setFixedSize(180, 240)
+        self.setWindowTitle(os.path.basename(file_path))
+        self.setMinimumSize(800, 600)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint)
+        
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setAlignment(Qt.AlignCenter)
+        self.scroll_area.setStyleSheet("background-color: #000; border: none;")
+        
+        self.image_label = QLabel()
+        self.image_label.setAlignment(Qt.AlignCenter)
+        
+        pixmap = QPixmap(file_path)
+        if not pixmap.isNull():
+            # Redimensionar se for muito maior que a tela inicial, mas permitir scroll
+            screen = QApplication.primaryScreen().size()
+            if pixmap.width() > screen.width() or pixmap.height() > screen.height():
+                self.image_label.setPixmap(pixmap.scaled(screen, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                self.image_label.setPixmap(pixmap)
+                
+        self.scroll_area.setWidget(self.image_label)
+        layout.addWidget(self.scroll_area)
+        
+        # Shortcuts
+        self.close_btn = QPushButton("CLOSE (ESC)")
+        self.close_btn.clicked.connect(self.accept)
+        self.close_btn.setStyleSheet("background: rgba(0,0,0,0.5); color: white; border: none; padding: 10px;")
+        layout.addWidget(self.close_btn)
+
+class ImageWidget(QFrame):
+    clicked = Signal(str)
+    action_requested = Signal(str, str) # action_type, file_path
+
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(180, 240)
+        self.setObjectName("ImageCard")
+        self.setCursor(Qt.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
         
         self.file_path = file_path
         ext = os.path.splitext(file_path)[1].lower()
         self.is_video = ext in ['.mp4', '.webm', '.mov']
         
-        # Image / Placeholder
+        # Image Container
+        self.image_container = QFrame()
+        self.image_container.setFixedSize(164, 164)
+        self.image_container.setObjectName("ThumbnailContainer")
+        container_layout = QVBoxLayout(self.image_container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.image_label = QLabel()
-        self.image_label.setFixedSize(160, 160)
-        self.image_label.setScaledContents(False) # Mudado para False para controle manual
+        self.image_label.setFixedSize(164, 164)
         self.image_label.setAlignment(Qt.AlignCenter)
         
         if self.is_video:
             self.image_label.setText("🎥 VIDEO")
-            self.image_label.setStyleSheet("background-color: #444; color: #fff; font-weight: bold; font-size: 16px; border-radius: 4px;")
+            self.image_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         else:
             self.image_label.setText("Loading...")
-            self.image_label.setStyleSheet("background-color: #222; color: #555; border-radius: 4px;")
+            self.image_label.setStyleSheet("color: #888;")
         
-        layout.addWidget(self.image_label)
+        container_layout.addWidget(self.image_label)
+        layout.addWidget(self.image_container)
         
         # Info
         file_name = os.path.basename(file_path)
         try:
-            file_size = os.path.getsize(file_path) / 1024 # KB
+            self.file_size_bytes = os.path.getsize(file_path)
+            file_size = self.file_size_bytes / 1024 # KB
             size_str = f"{file_size:.1f} KB" if file_size < 1024 else f"{file_size/1024:.2f} MB"
         except:
-            size_str = "Unknown size"
+            self.file_size_bytes = 0
+            size_str = "Unknown"
             
         self.info_label = QLabel(f"<b>{file_name}</b><br>{size_str}")
         self.info_label.setWordWrap(True)
-        self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setStyleSheet("font-size: 10px; color: #ccc;")
+        self.info_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.info_label.setObjectName("CardInfo")
         layout.addWidget(self.info_label)
+
+    def mousePressEvent(self, event):
+        try:
+            if event.button() == Qt.LeftButton:
+                self.clicked.emit(self.file_path)
+            super().mousePressEvent(event)
+        except RuntimeError:
+            pass # Objeto já foi deletado pelo gerenciador de memória
+
+    def contextMenuEvent(self, event):
+        try:
+            menu = QMenu(self)
+            open_folder = menu.addAction("📁 Open Folder")
+            open_browser = menu.addAction("🌐 Open in Browser (ID)")
+            menu.addSeparator()
+            delete_file = menu.addAction("🗑️ Delete File")
+            
+            action = menu.exec(event.globalPos())
+            if action == open_folder:
+                self.action_requested.emit("open_folder", self.file_path)
+            elif action == open_browser:
+                self.action_requested.emit("open_browser", self.file_path)
+            elif action == delete_file:
+                self.action_requested.emit("delete", self.file_path)
+        except RuntimeError:
+            pass
 
     def set_pixmap(self, pixmap):
         if not self.is_video:
             self.image_label.setText("")
             self.image_label.setPixmap(pixmap)
-            self.image_label.setStyleSheet("background-color: transparent; border-radius: 4px;")
+            self.image_label.setStyleSheet("background: transparent;")
 
 class TagEdit(QLineEdit):
     def __init__(self, *args, **kwargs):
@@ -179,10 +255,12 @@ class TagEdit(QLineEdit):
         text = self.text()
         pos = self.cursorPosition()
         before_cursor = text[:pos]
-        words = before_cursor.split()
-        if not words:
+        
+        if not before_cursor or before_cursor.endswith(" "):
             return ""
-        return words[-1]
+            
+        words = before_cursor.split()
+        return words[-1] if words else ""
 
     def keyPressEvent(self, event):
         if self._completer and self._completer.popup().isVisible():
@@ -195,11 +273,19 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Rule34 Downloader Elite")
-        self.resize(1200, 800)
         
+        # Inicializar variáveis de estado ANTES de configurar a UI
         self.output_dir = "downloads"
+        self.image_count = 0
+        self.columns = 4
+        self.image_widgets = {} 
+        self.worker = None
+        self.autocomplete_worker = None
+        
         self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(4) # Limitar threads de renderização para não travar CPU
+        self.thread_pool.setMaxThreadCount(4)
+        
+        self.resize(1200, 800)
         
         # Engine para Autocomplete
         self.engine = R34Downloader()
@@ -209,322 +295,259 @@ class MainWindow(QMainWindow):
         self.completer.setCompletionMode(QCompleter.PopupCompletion)
         self.completer.setCaseSensitivity(Qt.CaseInsensitive)
         
-        # Worker de autocomplete
-        self.autocomplete_worker = None
-        
         # Timer para evitar muitas requisições no autocomplete
         self.autocomplete_timer = QTimer()
         self.autocomplete_timer.setSingleShot(True)
         self.autocomplete_timer.timeout.connect(self.request_autocomplete)
 
         self.setup_ui()
-        self.worker = None
 
     def apply_theme(self, theme_name):
-        themes = {
-            "Dark Elite": """
-                QMainWindow { background-color: #1a1a1a; }
-                QWidget#ImageContainer { background-color: #121212; }
-                QFrame#HeaderFrame { background-color: #252525; border-radius: 8px; }
-                QLineEdit, QSpinBox, QComboBox { background-color: #333; color: #fff; border: 1px solid #444; border-radius: 4px; padding: 5px; }
-                QPushButton { background-color: #3a3a3a; color: #fff; border-radius: 6px; }
-                QPushButton:hover { background-color: #4a4a4a; }
-                QProgressBar { background-color: #333; border: none; border-radius: 4px; }
-                QProgressBar::chunk { background-color: #0078d4; }
-                QTextEdit { background-color: #1e1e1e; color: #00ff00; border: 1px solid #333; font-family: 'Consolas'; }
-            """,
-            "Cyberpunk Neon": """
-                QMainWindow { background-color: #0d0221; }
-                QWidget#ImageContainer { background-color: #050110; }
-                QFrame#HeaderFrame { background-color: #0d0221; border: 2px solid #ff00ff; border-radius: 0px; }
-                QLineEdit, QSpinBox, QComboBox { 
-                    background-color: #0d0221; color: #00ffff; border: 1px solid #00ffff; border-radius: 0px; 
-                    font-family: 'Impact'; font-size: 14px;
-                }
-                QPushButton { 
-                    background-color: #ff00ff; color: #fff; border-radius: 0px; font-weight: bold; 
-                    border-bottom: 4px solid #800080; 
-                }
-                QPushButton:hover { background-color: #ff55ff; border-bottom: 2px solid #800080; }
-                QProgressBar { background-color: #1a0033; border: 1px solid #ff00ff; border-radius: 0px; }
-                QProgressBar::chunk { background-color: #00ffff; }
-                QTextEdit { 
-                    background-color: #050110; color: #ff00ff; border: 1px solid #00ffff; 
-                    font-family: 'Courier New'; font-weight: bold;
-                }
-                QLabel { color: #00ffff; text-transform: uppercase; font-weight: bold; }
-            """,
-            "Retro Hacker": """
-                QMainWindow { background-color: #000; }
-                QWidget#ImageContainer { background-color: #000; border: 2px solid #00ff00; }
-                QFrame#HeaderFrame { background-color: #000; border-bottom: 2px solid #00ff00; }
-                QLineEdit, QSpinBox, QComboBox { 
-                    background-color: #000; color: #00ff00; border: 1px solid #00ff00; 
-                    font-family: 'Courier New'; font-size: 12px;
-                }
-                QPushButton { 
-                    background-color: #000; color: #00ff00; border: 2px solid #00ff00; 
-                    font-family: 'Courier New'; font-weight: bold;
-                }
-                QPushButton:hover { background-color: #004400; }
-                QProgressBar { background-color: #000; border: 1px solid #00ff00; }
-                QProgressBar::chunk { background-color: #00ff00; }
-                QTextEdit { background-color: #000; color: #00ff00; border: 1px solid #00ff00; }
-                QLabel { color: #00ff00; font-family: 'Courier New'; }
-            """,
-            "Nordic Frost": """
-                QMainWindow { background-color: #eceff4; }
-                QWidget#ImageContainer { background-color: #fff; border-radius: 15px; margin: 10px; }
-                QFrame#HeaderFrame { background-color: #e5e9f0; border-radius: 20px; border: 1px solid #d8dee9; }
-                QLineEdit, QSpinBox, QComboBox { 
-                    background-color: #fff; color: #2e3440; border: 1px solid #d8dee9; 
-                    border-radius: 10px; padding: 8px;
-                }
-                QPushButton { 
-                    background-color: #88c0d0; color: #fff; border-radius: 12px; font-weight: 500;
-                }
-                QPushButton:hover { background-color: #81a1c1; }
-                QProgressBar { background-color: #d8dee9; border-radius: 10px; height: 12px; }
-                QProgressBar::chunk { background-color: #81a1c1; border-radius: 10px; }
-                QTextEdit { background-color: #fff; color: #4c566a; border-radius: 10px; border: 1px solid #d8dee9; }
-                QLabel { color: #4c566a; }
-            """,
-            "Amoled": """
-                QMainWindow { background-color: #000000; }
-                QWidget#ImageContainer { background-color: #000000; }
-                QFrame#HeaderFrame { background-color: #000000; border: 1px solid #222; border-radius: 0px; }
-                QLineEdit, QSpinBox, QComboBox { 
-                    background-color: #000; color: #fff; border: 1px solid #333; 
-                    border-radius: 0px;
-                }
-                QPushButton { background-color: #111; color: #fff; border: 1px solid #333; border-radius: 0px; }
-                QPushButton:hover { background-color: #222; }
-                QProgressBar { background-color: #111; border: none; }
-                QProgressBar::chunk { background-color: #fff; }
-                QTextEdit { background-color: #000; color: #aaa; border: 1px solid #222; }
-                QLabel { color: #888; }
-            """
+        palettes = {
+            "Dark Elite": {
+                "bg": "#121212", "header": "#1e1e1e", "card": "#252525", "accent": "#0078d4",
+                "text": "#ffffff", "text_dim": "#aaaaaa", "border": "#333333", "input": "#2d2d2d"
+            },
+            "Cyberpunk": {
+                "bg": "#0d0221", "header": "#1a0b2e", "card": "#1a0b2e", "accent": "#ff00ff",
+                "text": "#00ffff", "text_dim": "#ff00ff", "border": "#ff00ff", "input": "#0d0221"
+            },
+            "Midnight": {
+                "bg": "#0a0e14", "header": "#151b23", "card": "#151b23", "accent": "#58a6ff",
+                "text": "#adbac7", "text_dim": "#768390", "border": "#30363d", "input": "#0d1117"
+            },
+            "Emerald": {
+                "bg": "#060f0e", "header": "#0d1f1d", "card": "#0d1f1d", "accent": "#10b981",
+                "text": "#ecfdf5", "text_dim": "#6ee7b7", "border": "#134e4a", "input": "#061512"
+            },
+            "Nordic": {
+                "bg": "#eceff4", "header": "#e5e9f0", "card": "#ffffff", "accent": "#81a1c1",
+                "text": "#2e3440", "text_dim": "#4c566a", "border": "#d8dee9", "input": "#ffffff"
+            }
         }
         
-        style = themes.get(theme_name, themes["Dark Elite"])
-        self.setStyleSheet(style)
+        p = palettes.get(theme_name, palettes["Dark Elite"])
+        is_dark = theme_name != "Nordic"
         
-        # Atualizar widgets específicos que precisam de estilo manual
-        for i in range(self.image_grid.count()):
-            widget = self.image_grid.itemAt(i).widget()
-            if widget:
-                if theme_name == "Cyberpunk Neon":
-                    widget.setStyleSheet("background-color: #0d0221; border: 1px solid #00ffff; border-radius: 0px;")
-                elif theme_name == "Retro Hacker":
-                    widget.setStyleSheet("background-color: #000; border: 1px solid #00ff00; border-radius: 0px;")
-                elif theme_name == "Nordic Frost":
-                    widget.setStyleSheet("background-color: #fff; border: 1px solid #d8dee9; border-radius: 15px;")
-                elif theme_name == "Amoled":
-                    widget.setStyleSheet("background-color: #000; border: 1px solid #222; border-radius: 0px;")
-                else:
-                    widget.setStyleSheet("background-color: #222; border-radius: 8px;")
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {p['bg']}; color: {p['text']}; }}
+            QWidget#ImageContainer {{ background-color: {p['bg']}; }}
+            QFrame#HeaderFrame {{ background-color: {p['header']}; border-bottom: 1px solid {p['border']}; }}
+            QFrame#SettingsPanel {{ background-color: {p['header']}; border-right: 1px solid {p['border']}; }}
+            
+            QLabel {{ color: {p['text']}; }}
+            QLabel#CardInfo {{ color: {p['text_dim']}; font-size: 10px; }}
+            QLabel#SectionTitle {{ color: {p['accent']}; font-weight: bold; text-transform: uppercase; font-size: 11px; margin-top: 10px; }}
+            
+            QLineEdit, QSpinBox, QComboBox {{ 
+                background-color: {p['input']}; color: {p['text']}; border: 1px solid {p['border']}; 
+                border-radius: 6px; padding: 6px; 
+            }}
+            QLineEdit:focus {{ border: 1px solid {p['accent']}; }}
+            
+            QPushButton {{ 
+                background-color: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; 
+                border-radius: 6px; padding: 8px 15px; font-weight: 500;
+            }}
+            QPushButton:hover {{ background-color: {p['accent']}; color: white; border: 1px solid {p['accent']}; }}
+            QPushButton#PrimaryBtn {{ background-color: {p['accent']}; color: white; border: none; font-weight: bold; }}
+            QPushButton#PrimaryBtn:hover {{ background-color: {p['accent']}dd; }}
+            
+            QProgressBar {{ background-color: {p['input']}; border: none; border-radius: 2px; height: 4px; }}
+            QProgressBar::chunk {{ background-color: {p['accent']}; }}
+            
+            QTextEdit {{ 
+                background-color: {p['input']}; color: {p['text_dim']}; border: 1px solid {p['border']}; 
+                border-radius: 6px; font-family: 'Consolas'; font-size: 10px; 
+            }}
+            
+            QFrame#ImageCard {{ background-color: {p['card']}; border: 1px solid {p['border']}; border-radius: 12px; }}
+            QFrame#ThumbnailContainer {{ background-color: {p['bg'] if is_dark else '#f0f0f0'}; border-radius: 8px; }}
+            
+            QScrollArea {{ border: none; background-color: transparent; }}
+            QScrollBar:vertical {{ border: none; background: transparent; width: 8px; }}
+            QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 4px; }}
+            QScrollBar::handle:vertical:hover {{ background: {p['accent']}; }}
+        """)
 
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(10)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Header / Search area
-        header_frame = QFrame()
-        header_frame.setObjectName("HeaderFrame")
-        header_layout = QVBoxLayout(header_frame)
+        # --- Sidebar / Settings Panel ---
+        self.settings_panel = QFrame()
+        self.settings_panel.setObjectName("SettingsPanel")
+        self.settings_panel.setFixedWidth(280)
+        settings_layout = QVBoxLayout(self.settings_panel)
+        settings_layout.setContentsMargins(20, 20, 20, 20)
+        settings_layout.setSpacing(15)
         
-        search_layout = QHBoxLayout()
-        self.tag_input = TagEdit()
-        self.tag_input.setPlaceholderText("Enter tags here... (e.g. cat_ears, solo, high_res)")
-        self.tag_input.setMinimumHeight(45)
-        self.tag_input.setFont(QFont("Segoe UI", 12))
-        self.tag_input.returnPressed.connect(self.start_download)
-        self.tag_input.setCompleter(self.completer)
-        self.tag_input.textChanged.connect(lambda: self.autocomplete_timer.start(500))
-        search_layout.addWidget(self.tag_input)
+        logo_label = QLabel("RULE34 ELITE")
+        logo_label.setStyleSheet("font-size: 18px; font-weight: 900; letter-spacing: 2px; margin-bottom: 10px;")
+        settings_layout.addWidget(logo_label)
 
-        self.start_btn = QPushButton("SEARCH & DOWNLOAD")
-        self.start_btn.setMinimumHeight(45)
-        self.start_btn.setCursor(Qt.PointingHandCursor)
-        self.start_btn.clicked.connect(self.start_download)
-        self.start_btn.setStyleSheet("background-color: #0078d4; font-weight: bold; color: white; border: none;")
-        search_layout.addWidget(self.start_btn)
-        
-        self.stop_btn = QPushButton("STOP")
-        self.stop_btn.setMinimumHeight(45)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.setCursor(Qt.PointingHandCursor)
-        self.stop_btn.clicked.connect(self.stop_download)
-        self.stop_btn.setStyleSheet("background-color: #d83b01; font-weight: bold; color: white; border: none;")
-        search_layout.addWidget(self.stop_btn)
-        
-        header_layout.addLayout(search_layout)
-        
-        # Settings row
-        settings_layout = QHBoxLayout()
+        # Section: Configuration
+        settings_layout.addWidget(QLabel("Download Settings", objectName="SectionTitle"))
         
         self.threads_spin = QSpinBox()
         self.threads_spin.setRange(1, 50)
         self.threads_spin.setValue(10)
         self.threads_spin.setPrefix("Threads: ")
-        self.threads_spin.setMinimumHeight(30)
         settings_layout.addWidget(self.threads_spin)
         
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(1, 10000)
         self.limit_spin.setValue(100)
-        self.limit_spin.setPrefix("Quantity: ")
-        self.limit_spin.setMinimumHeight(30)
+        self.limit_spin.setPrefix("Total Limit: ")
         settings_layout.addWidget(self.limit_spin)
 
+        self.mass_download_check = QCheckBox("Download All Results")
+        self.mass_download_check.toggled.connect(self.limit_spin.setDisabled)
+        settings_layout.addWidget(self.mass_download_check)
+
+        # Section: Quick Tags
+        settings_layout.addWidget(QLabel("Quick Tags", objectName="SectionTitle"))
+        quick_tags_layout = QGridLayout()
+        tags = ["high_res", "solo", "wide_shot", "score:>100"]
+        for i, tag in enumerate(tags):
+            btn = QPushButton(tag)
+            btn.setStyleSheet("font-size: 10px; padding: 4px;")
+            # Usamos uma lambda que ignora o argumento 'checked' enviado pelo sinal
+            btn.clicked.connect(lambda checked=False, t=tag: self.add_quick_tag(t))
+            quick_tags_layout.addWidget(btn, i // 2, i % 2)
+        settings_layout.addLayout(quick_tags_layout)
+
+        # Section: Filters
+        settings_layout.addWidget(QLabel("Filters", objectName="SectionTitle"))
+        
         self.score_spin = QSpinBox()
         self.score_spin.setRange(0, 10000)
         self.score_spin.setValue(0)
         self.score_spin.setPrefix("Min Score: ")
-        self.score_spin.setMinimumHeight(30)
         settings_layout.addWidget(self.score_spin)
         
         self.rating_combo = QComboBox()
-        self.rating_combo.addItems(["Any Rating", "Rating: Safe", "Rating: Questionable", "Rating: Explicit"])
-        self.rating_combo.setMinimumHeight(30)
-        self.rating_combo.setStyleSheet("background-color: #333; color: white; border: 1px solid #444; border-radius: 4px; padding: 2px 10px;")
+        self.rating_combo.addItems(["Any Rating", "Safe", "Questionable", "Explicit"])
         settings_layout.addWidget(self.rating_combo)
         
-        self.mass_download_check = QCheckBox("Download All")
-        self.mass_download_check.setStyleSheet("color: white;")
-        self.mass_download_check.toggled.connect(self.limit_spin.setDisabled)
-        settings_layout.addWidget(self.mass_download_check)
-
-        self.ignore_blacklist_check = QCheckBox("Ignore Blacklist")
-        self.ignore_blacklist_check.setStyleSheet("color: white;")
-        settings_layout.addWidget(self.ignore_blacklist_check)
-        
         self.type_filter = QComboBox()
-        self.type_filter.addItems(["All Files", "Images Only", "Videos Only"])
-        self.type_filter.setMinimumHeight(30)
+        self.type_filter.addItems(["All Media", "Images Only", "Videos Only"])
         settings_layout.addWidget(self.type_filter)
 
+        self.ignore_blacklist_check = QCheckBox("Ignore Blacklist")
+        settings_layout.addWidget(self.ignore_blacklist_check)
+
+        # Section: Session Stats
+        settings_layout.addWidget(QLabel("Session Stats", objectName="SectionTitle"))
+        self.stats_label = QLabel("Downloaded: 0 MB\nFiles: 0")
+        self.stats_label.setStyleSheet("font-size: 11px; color: #888;")
+        settings_layout.addWidget(self.stats_label)
+        self.total_downloaded_size = 0
+        self.total_files_count = 0
+
+        # Section: Appearance & Tools
+        settings_layout.addWidget(QLabel("System", objectName="SectionTitle"))
+        
         self.theme_combo = QComboBox()
-        self.theme_combo.addItems(["Dark Elite", "Cyberpunk Neon", "Retro Hacker", "Nordic Frost", "Amoled"])
-        self.theme_combo.setMinimumHeight(30)
+        self.theme_combo.addItems(["Dark Elite", "Cyberpunk", "Midnight", "Emerald", "Nordic"])
         self.theme_combo.currentTextChanged.connect(self.apply_theme)
         settings_layout.addWidget(self.theme_combo)
         
+        tools_layout = QGridLayout()
+        self.creds_btn = QPushButton("🔑 Creds")
+        self.creds_btn.clicked.connect(self.setup_credentials)
+        tools_layout.addWidget(self.creds_btn, 0, 0)
+        
+        self.blacklist_btn = QPushButton("🚫 Blacklist")
+        self.blacklist_btn.clicked.connect(self.setup_blacklist)
+        tools_layout.addWidget(self.blacklist_btn, 0, 1)
+        
+        self.open_folder_btn = QPushButton("📁 Downloads")
+        self.open_folder_btn.clicked.connect(self.open_downloads)
+        tools_layout.addWidget(self.open_folder_btn, 1, 0, 1, 2)
+        
+        settings_layout.addLayout(tools_layout)
         settings_layout.addStretch()
         
-        self.open_folder_btn = QPushButton("📁 Open Downloads")
-        self.open_folder_btn.setMinimumHeight(30)
-        self.open_folder_btn.clicked.connect(self.open_downloads)
-        settings_layout.addWidget(self.open_folder_btn)
-        
-        self.creds_btn = QPushButton("🔑 Credentials")
-        self.creds_btn.setMinimumHeight(30)
-        self.creds_btn.clicked.connect(self.setup_credentials)
-        settings_layout.addWidget(self.creds_btn)
+        main_layout.addWidget(self.settings_panel)
 
-        self.blacklist_btn = QPushButton("🚫 Blacklist")
-        self.blacklist_btn.setMinimumHeight(30)
-        self.blacklist_btn.clicked.connect(self.setup_blacklist)
-        settings_layout.addWidget(self.blacklist_btn)
+        # --- Main Content Area ---
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
         
-        header_layout.addLayout(settings_layout)
-        main_layout.addWidget(header_frame)
+        # Header / Search Bar
+        header_frame = QFrame()
+        header_frame.setObjectName("HeaderFrame")
+        header_frame.setFixedHeight(80)
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(20, 0, 20, 0)
+        header_layout.setSpacing(10)
+        
+        self.toggle_settings_btn = QPushButton("☰")
+        self.toggle_settings_btn.setFixedSize(45, 45)
+        self.toggle_settings_btn.setCheckable(True)
+        self.toggle_settings_btn.setChecked(True)
+        self.toggle_settings_btn.toggled.connect(self.settings_panel.setVisible)
+        header_layout.addWidget(self.toggle_settings_btn)
 
-        # Progress bar
+        self.tag_input = TagEdit()
+        self.tag_input.setPlaceholderText("Search tags... (e.g. cat_ears, solo, score:>100)")
+        self.tag_input.setFixedHeight(45)
+        self.tag_input.setFont(QFont("Segoe UI", 11))
+        self.tag_input.returnPressed.connect(self.start_download)
+        self.tag_input.setCompleter(self.completer)
+        self.tag_input.textChanged.connect(lambda: self.autocomplete_timer.start(500))
+        header_layout.addWidget(self.tag_input)
+
+        self.start_btn = QPushButton("SEARCH")
+        self.start_btn.setObjectName("PrimaryBtn")
+        self.start_btn.setFixedSize(120, 45)
+        self.start_btn.setCursor(Qt.PointingHandCursor)
+        self.start_btn.clicked.connect(self.start_download)
+        header_layout.addWidget(self.start_btn)
+        
+        self.stop_btn = QPushButton("STOP")
+        self.stop_btn.setFixedSize(80, 45)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_download)
+        header_layout.addWidget(self.stop_btn)
+        
+        content_layout.addWidget(header_frame)
+        
+        # Progress Bar
         self.progress_bar = QProgressBar()
-        self.progress_bar.setMaximumHeight(8)
-        self.progress_bar.setTextVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        content_layout.addWidget(self.progress_bar)
 
         # Split view: Images and Logs
-        content_layout = QHBoxLayout()
+        view_layout = QHBoxLayout()
+        view_layout.setSpacing(0)
         
         # Images Scroll Area
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.image_container = QWidget()
         self.image_container.setObjectName("ImageContainer")
         self.image_grid = QGridLayout(self.image_container)
         self.image_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.image_grid.setSpacing(15)
         self.scroll_area.setWidget(self.image_container)
-        content_layout.addWidget(self.scroll_area, 4) # 80% width
+        view_layout.addWidget(self.scroll_area, 4)
 
-        # Log area
-        log_container = QWidget()
-        log_layout = QVBoxLayout(log_container)
-        log_layout.setContentsMargins(0, 0, 0, 0)
-        
-        log_title = QLabel("ACTIVITY LOG")
-        log_title.setStyleSheet("font-weight: bold; color: #888; margin-bottom: 5px;")
-        log_layout.addWidget(log_title)
-        
+        # Log area (collapsible/toggleable might be good later, but for now 20% width)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        log_layout.addWidget(self.log_area)
+        self.log_area.setFixedWidth(250)
+        view_layout.addWidget(self.log_area)
         
-        content_layout.addWidget(log_container, 1) # 20% width
-        
-        main_layout.addLayout(content_layout)
-        
-        self.image_count = 0
-        self.columns = 4
-        self.image_widgets = {} # Track widgets by file_path for async updates
+        content_layout.addLayout(view_layout)
+        main_layout.addWidget(content_widget)
 
-        # Style
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1a1a1a; }
-            QWidget#ImageContainer { background-color: #121212; }
-            QFrame#HeaderFrame { background-color: #252525; border-radius: 8px; padding: 5px; }
-            QLabel { color: #e1e1e1; }
-            QLineEdit { 
-                background-color: #333; 
-                color: #fff; 
-                border: 1px solid #444; 
-                border-radius: 6px; 
-                padding: 0 12px;
-            }
-            QLineEdit:focus { border: 1px solid #0078d4; }
-            QPushButton { 
-                color: #fff; 
-                border-radius: 6px; 
-                padding: 5px 15px;
-                background-color: #3a3a3a;
-            }
-            QPushButton:hover { background-color: #4a4a4a; }
-            QPushButton:disabled { background-color: #222; color: #555; }
-            
-            QSpinBox {
-                background-color: #333;
-                color: #fff;
-                border: 1px solid #444;
-                padding: 5px;
-                border-radius: 4px;
-            }
-            
-            QProgressBar { 
-                border: none; 
-                background-color: #333; 
-                border-radius: 4px; 
-            }
-            QProgressBar::chunk { 
-                background-color: #0078d4; 
-                border-radius: 4px;
-            }
-            
-            QTextEdit { 
-                background-color: #1e1e1e; 
-                color: #00ff00; 
-                border: 1px solid #333; 
-                border-radius: 4px;
-                font-family: 'Consolas', 'Monaco', monospace; 
-                font-size: 10px; 
-            }
-            
-            QFrame { border: 1px solid #333; border-radius: 6px; }
-        """)
+        self.apply_theme("Dark Elite")
 
     def start_download(self):
         from dotenv import load_dotenv
@@ -620,6 +643,10 @@ class MainWindow(QMainWindow):
         self.rearrange_images()
 
     def rearrange_images(self):
+        # Proteção: Verifica se os componentes da UI já foram criados
+        if not hasattr(self, 'image_widgets') or not hasattr(self, 'image_grid'):
+            return
+            
         if not self.image_widgets:
             return
             
@@ -650,6 +677,56 @@ class MainWindow(QMainWindow):
         self.log_area.append(msg)
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
 
+    def add_quick_tag(self, tag):
+        if not isinstance(tag, str):
+            return
+        current_text = self.tag_input.text().strip()
+        if tag not in current_text:
+            self.tag_input.setText(f"{current_text} {tag}".strip())
+
+    def handle_image_click(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ['.mp4', '.webm', '.mov']:
+            self.open_downloads() # Melhore abrir pasta para vídeos por enquanto
+        else:
+            viewer = FullscreenViewer(file_path, self)
+            viewer.exec()
+
+    def handle_image_action(self, action_type, file_path):
+        if action_type == "open_folder":
+            folder = os.path.dirname(os.path.abspath(file_path))
+            if sys.platform == 'win32': os.startfile(folder)
+            elif sys.platform == 'darwin': subprocess.Popen(['open', folder])
+            else: subprocess.Popen(['xdg-open', folder])
+        elif action_type == "open_browser":
+            # Extrair ID do nome do arquivo (ex: 12345.jpg -> 12345)
+            post_id = os.path.basename(file_path).split('.')[0]
+            if post_id.isdigit():
+                webbrowser.open(f"https://rule34.xxx/index.php?page=post&s=view&id={post_id}")
+        elif action_type == "delete":
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    self.log_message(f"[!] Arquivo excluído: {os.path.basename(file_path)}")
+                
+                # Limpar do dicionário e remover widget
+                if file_path in self.image_widgets:
+                    widget = self.image_widgets.pop(file_path)
+                    widget.setParent(None)
+                    widget.deleteLater()
+            except Exception as e:
+                self.log_message(f"[!] Erro ao excluir: {e}")
+
+    def update_stats(self, file_path):
+        try:
+            size = os.path.getsize(file_path)
+            self.total_downloaded_size += size
+            self.total_files_count += 1
+            mb = self.total_downloaded_size / (1024 * 1024)
+            self.stats_label.setText(f"Downloaded: {mb:.2f} MB\nFiles: {self.total_files_count}")
+        except:
+            pass
+
     def add_image(self, file_path):
         # Determine number of columns based on width
         width = self.scroll_area.width()
@@ -669,21 +746,25 @@ class MainWindow(QMainWindow):
         col = self.image_count % self.columns
         
         img_widget = ImageWidget(file_path)
+        img_widget.clicked.connect(self.handle_image_click)
+        img_widget.action_requested.connect(self.handle_image_action)
         
         # Aplicar estilo do tema atual
-        theme_name = self.theme_combo.currentText()
-        if theme_name == "Cyberpunk Neon":
-            img_widget.setStyleSheet("background-color: #0d0221; border: 1px solid #00ffff; border-radius: 0px;")
-        elif theme_name == "Retro Hacker":
-            img_widget.setStyleSheet("background-color: #000; border: 1px solid #00ff00; border-radius: 0px;")
-        elif theme_name == "Nordic Frost":
-            img_widget.setStyleSheet("background-color: #fff; border: 1px solid #d8dee9; border-radius: 15px;")
-        elif theme_name == "Amoled":
-            img_widget.setStyleSheet("background-color: #000; border: 1px solid #222; border-radius: 0px;")
+        palettes = {
+            "Dark Elite": {"card": "#252525", "border": "#333333"},
+            "Cyberpunk": {"card": "#1a0b2e", "border": "#ff00ff"},
+            "Midnight": {"card": "#151b23", "border": "#30363d"},
+            "Emerald": {"card": "#0d1f1d", "border": "#134e4a"},
+            "Nordic": {"card": "#ffffff", "border": "#d8dee9"}
+        }
+        p = palettes.get(self.theme_combo.currentText(), palettes["Dark Elite"])
+        img_widget.setStyleSheet(f"background-color: {p['card']}; border: 1px solid {p['border']}; border-radius: 12px;")
         
         self.image_widgets[file_path] = img_widget
         self.image_grid.addWidget(img_widget, row, col)
         self.image_count += 1
+        
+        self.update_stats(file_path)
         
         # Iniciar carregamento assíncrono se não for vídeo
         if not img_widget.is_video:
