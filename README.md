@@ -1,5 +1,4 @@
-# PROVAVELMENTE DESCONTINUADO
-
+# NEW EXTREMELY BIG UPDATE SOON
 # Booru Downloader - CLI e GUI Tool 🚀
 
 ![Python Version](https://img.shields.io/badge/python-3.x-blue.svg)
